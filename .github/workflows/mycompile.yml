@@ -29,7 +29,8 @@ jobs:
             pkg-config \
             git \
             perl \
-            ca-certificates
+            ca-certificates \
+            libpsl-dev
 
       - name: Build OpenSSL, nghttp3, ngtcp2 and curl
         shell: bash

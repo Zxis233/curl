@@ -1,0 +1,126 @@
+name: build-curl-http3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    env:
+      OPENSSL_VERSION: 3.5.6
+      NGHTTP3_VERSION: v1.15.0
+      NGTCP2_VERSION: v1.22.0
+      CURL_VERSION: curl-8_19_0
+      PREFIX: ${{ github.workspace }}/curl-http3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            git \
+            perl \
+            ca-certificates
+
+      - name: Build OpenSSL, nghttp3, ngtcp2 and curl
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          export SRC_DIR="${RUNNER_TEMP}/src"
+          export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig"
+          export RELOC_RPATH='-Wl,-rpath,$ORIGIN/../lib'
+
+          mkdir -p "${PREFIX}" "${SRC_DIR}"
+          cd "${SRC_DIR}"
+
+          echo "==> Build OpenSSL ${OPENSSL_VERSION}"
+          git clone --depth 1 -b "openssl-${OPENSSL_VERSION}" https://github.com/openssl/openssl
+          pushd openssl
+          ./config --prefix="${PREFIX}" --libdir=lib
+          make -j"$(nproc)"
+          make install
+          popd
+
+          echo "==> Build nghttp3 ${NGHTTP3_VERSION}"
+          git clone --depth 1 -b "${NGHTTP3_VERSION}" https://github.com/ngtcp2/nghttp3
+          pushd nghttp3
+          git submodule update --init
+          autoreconf -fi
+          ./configure --prefix="${PREFIX}" --enable-lib-only
+          make -j"$(nproc)"
+          make install
+          popd
+
+          echo "==> Build ngtcp2 ${NGTCP2_VERSION}"
+          git clone --depth 1 -b "${NGTCP2_VERSION}" https://github.com/ngtcp2/ngtcp2
+          pushd ngtcp2
+          autoreconf -fi
+          PKG_CONFIG_PATH="${PKG_CONFIG_PATH}" \
+          LDFLAGS="${RELOC_RPATH}" \
+          ./configure \
+            --prefix="${PREFIX}" \
+            --enable-lib-only \
+            --with-openssl
+          make -j"$(nproc)"
+          make install
+          popd
+
+          echo "==> Build curl ${CURL_VERSION}"
+          git clone --depth 1 -b "${CURL_VERSION}" https://github.com/curl/curl
+          pushd curl
+          autoreconf -fi
+          PKG_CONFIG_PATH="${PKG_CONFIG_PATH}" \
+          LDFLAGS="${RELOC_RPATH}" \
+          ./configure \
+            --prefix="${PREFIX}" \
+            --with-openssl="${PREFIX}" \
+            --with-ngtcp2="${PREFIX}" \
+            --with-nghttp3="${PREFIX}"
+          make -j"$(nproc)"
+          make install
+          popd
+
+          echo "==> Create relocatable wrapper"
+          cat > "${PREFIX}/bin/curl-http3" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          ROOT="$(cd "${HERE}/.." && pwd)"
+          export LD_LIBRARY_PATH="${ROOT}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          exec "${ROOT}/bin/curl" "$@"
+          EOF
+          chmod +x "${PREFIX}/bin/curl-http3"
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export LD_LIBRARY_PATH="${PREFIX}/lib"
+          "${PREFIX}/bin/curl-http3" -V
+
+      - name: Optional HTTP/3 probe
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export LD_LIBRARY_PATH="${PREFIX}/lib"
+          "${PREFIX}/bin/curl-http3" --http3-only -I https://cloudflare-quic.com || true
+
+      - name: Package artifact
+        run: |
+          tar -C "${GITHUB_WORKSPACE}" -czf "${RUNNER_TEMP}/curl-http3-ubuntu-24.04.tar.gz" "$(basename "${PREFIX}")"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: curl-http3-ubuntu-24.04
+          path: ${{ runner.temp }}/curl-http3-ubuntu-24.04.tar.gz
